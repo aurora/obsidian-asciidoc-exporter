@@ -1,0 +1,12 @@
+{
+  "id": "obsidian-asciidoc-exporter",
+  "name": "Vault AsciiDoc Exporter",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Export your entire Obsidian vault as AsciiDoc with preserved structure and diagrams",
+  "author": "Harald Lapp",
+  "authorUrl": "https://github.com/aurora",
+  "fundingUrl": "",
+  "isDesktopOnly": false,
+  "main": "main.js"
+}

@@ -1,5 +1,8 @@
 # Obsidian Vault AsciiDoc Exporter
 
+![AI Generated](https://img.shields.io/badge/AI%20Generated-Yes-blue)
+> Model: Claude Sonnet-4 (2025-05-14) via Roo
+
 Export your entire Obsidian vault as AsciiDoc with preserved structure and diagrams.
 
 ## Features

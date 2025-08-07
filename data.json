@@ -1,0 +1,12 @@
+{
+  "lastExportPath": "C:\\Users\\haraldlapp\\Documents\\vault-export",
+  "includeAttachments": true,
+  "renderDiagrams": false,
+  "customPluginSupport": true,
+  "format": "asciidoc",
+  "httpServer": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 8080
+  }
+}

@@ -1,6 +1,6 @@
 import { App, TFile, TFolder } from 'obsidian';
 import { PluginRegistry } from './plugin-registry';
-import { ExportSettings, VaultStructure, VaultFile, VaultFolder, ExportedFile } from './types';
+import { ExportSettings, VaultStructure, VaultFile, VaultFolder, ExportedFile, ExportData, ExportFileData } from './types';
 
 export class VaultExporter {
     private app: App;
@@ -35,19 +35,54 @@ export class VaultExporter {
         console.log(`AsciiDoc export completed. Generated ${this.exportedFiles.length} files.`);
     }
 
+    async exportVaultToMemory(settings: ExportSettings): Promise<ExportData> {
+        this.exportSettings = settings;
+        this.exportedFiles = [];
+
+        console.log('Starting in-memory vault export as AsciiDoc with settings:', settings);
+
+        // Get vault structure
+        const vaultStructure = await this.getVaultStructure();
+
+        // Export as AsciiDoc to memory
+        await this.exportAsAsciiDocToMemory(vaultStructure);
+
+        const exportData: ExportData = {
+            files: this.exportedFiles.map(file => ({
+                path: file.path,
+                content: file.content,
+                type: file.type,
+                size: Buffer.byteLength(file.content, 'utf8')
+            })),
+            metadata: {
+                exportedAt: new Date().toISOString(),
+                totalFiles: this.exportedFiles.length,
+                settings: settings
+            }
+        };
+
+        console.log(`In-memory AsciiDoc export completed. Generated ${exportData.files.length} files.`);
+        return exportData;
+    }
+
     private resolveExportPath(exportPath: string): string {
+        // If exportPath is absolute, use it as-is
+        if (this.isAbsolutePath(exportPath)) {
+            return exportPath;
+        }
+        
         // If exportPath is relative, make it relative to a parent directory
         // This ensures the export is outside the vault
-        if (!this.isAbsolutePath(exportPath)) {
-            // Use a default parent directory
-            return '../' + exportPath;
-        }
-        return exportPath;
+        return '../' + exportPath;
     }
 
     private isAbsolutePath(filePath: string): boolean {
-        // Simple check for absolute paths (Windows and Unix)
-        return filePath.startsWith('/') || /^[A-Za-z]:/.test(filePath);
+        // Enhanced check for absolute paths (Windows and Unix)
+        // Windows: C:\, D:\, etc. or \\server\share (UNC)
+        // Unix/Linux: /path
+        return filePath.startsWith('/') ||
+               /^[A-Za-z]:[\\\/]/.test(filePath) ||
+               filePath.startsWith('\\\\');
     }
 
     private async exportAsAsciiDoc(vaultStructure: VaultStructure): Promise<void> {
@@ -68,6 +103,23 @@ export class VaultExporter {
         await this.generateIndexAsciiDoc(vaultStructure);
 
         console.log('AsciiDoc export completed - vault structure preserved with AsciiDoc format');
+    }
+
+    private async exportAsAsciiDocToMemory(vaultStructure: VaultStructure): Promise<void> {
+        console.log('Exporting as AsciiDoc to memory...');
+        
+        // Export all markdown files as AsciiDoc to memory
+        await this.exportMarkdownFilesAsAsciiDocToMemory(vaultStructure.files);
+
+        // Copy ALL attachments to memory
+        if (this.exportSettings.includeAttachments) {
+            await this.copyAllAttachmentsToMemory(vaultStructure.files);
+        }
+
+        // Generate index file in memory
+        await this.generateIndexAsciiDocToMemory(vaultStructure);
+
+        console.log('AsciiDoc in-memory export completed - vault structure preserved with AsciiDoc format');
     }
 
     private async getVaultStructure(): Promise<VaultStructure> {
@@ -157,54 +209,258 @@ export class VaultExporter {
 
         let asciidocContent = content;
 
-        // Convert headers
+        // Extract and process frontmatter first
+        const { content: contentWithoutFrontmatter, frontmatter } = this.extractFrontmatter(asciidocContent);
+        asciidocContent = contentWithoutFrontmatter;
+
+        // Convert Obsidian-specific features first
+        asciidocContent = this.convertObsidianTags(asciidocContent);
+        asciidocContent = this.convertObsidianCallouts(asciidocContent);
+        asciidocContent = this.convertObsidianEmbeds(asciidocContent);
+        asciidocContent = this.convertObsidianWikilinks(asciidocContent);
+        asciidocContent = this.convertObsidianBlockReferences(asciidocContent);
+        asciidocContent = this.convertObsidianMath(asciidocContent);
+
+        // Convert standard markdown features
         asciidocContent = this.convertHeaders(asciidocContent);
-
-        // Convert emphasis and strong
         asciidocContent = this.convertEmphasis(asciidocContent);
-
-        // Convert code blocks (keep diagrams as-is if renderDiagrams is false)
         asciidocContent = await this.convertCodeBlocks(asciidocContent, file);
-
-        // Convert inline code
         asciidocContent = this.convertInlineCode(asciidocContent);
-
-        // Convert lists
         asciidocContent = this.convertLists(asciidocContent);
-
-        // Convert links
         asciidocContent = this.convertLinks(asciidocContent);
-
-        // Convert images
         asciidocContent = this.convertImages(asciidocContent);
-
-        // Convert tables
         asciidocContent = this.convertTables(asciidocContent);
-
-        // Convert blockquotes
         asciidocContent = this.convertBlockquotes(asciidocContent);
-
-        // Convert horizontal rules
         asciidocContent = this.convertHorizontalRules(asciidocContent);
 
-        // Add document header
-        asciidocContent = this.addDocumentHeader(asciidocContent, file);
+        // Add document header with frontmatter
+        asciidocContent = this.addDocumentHeader(asciidocContent, file, frontmatter);
 
         return asciidocContent;
     }
 
-    private addDocumentHeader(content: string, file: VaultFile): string {
+    private addDocumentHeader(content: string, file: VaultFile, frontmatter?: any): string {
         const title = file.name.replace('.md', '');
-        const header = `= ${title}
-:doctype: article
+        let header = `= ${title}\n`;
+        
+        // Add frontmatter attributes if available
+        if (frontmatter) {
+            if (frontmatter.author) header += `:author: ${frontmatter.author}\n`;
+            if (frontmatter.email) header += `:email: ${frontmatter.email}\n`;
+            if (frontmatter.created) header += `:revdate: ${frontmatter.created}\n`;
+            if (frontmatter.modified) header += `:revdate: ${frontmatter.modified}\n`;
+            if (frontmatter.description) header += `:description: ${frontmatter.description}\n`;
+            if (frontmatter.keywords) {
+                const keywords = Array.isArray(frontmatter.keywords) ? frontmatter.keywords.join(', ') : frontmatter.keywords;
+                header += `:keywords: ${keywords}\n`;
+            }
+            if (frontmatter.tags) {
+                const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags.join(', ') : frontmatter.tags;
+                header += `:keywords: ${tags}\n`;
+            }
+            if (frontmatter.aliases) {
+                const aliases = Array.isArray(frontmatter.aliases) ? frontmatter.aliases.join(', ') : frontmatter.aliases;
+                header += `:aliases: ${aliases}\n`;
+            }
+            if (frontmatter.cssclass) header += `:stylesheet: ${frontmatter.cssclass}.css\n`;
+        }
+        
+        // Add standard AsciiDoc attributes
+        header += `:doctype: article
 :toc: left
 :toclevels: 3
 :sectlinks:
 :sectanchors:
 :source-highlighter: highlight.js
+:stem: latexmath
 
 `;
         return header + content;
+    }
+
+    private extractFrontmatter(content: string): { content: string; frontmatter?: any } {
+        const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n/;
+        const match = content.match(frontmatterRegex);
+        
+        if (!match) {
+            return { content };
+        }
+        
+        try {
+            // Simple YAML parsing for common frontmatter fields
+            const yamlContent = match[1];
+            const frontmatter: any = {};
+            
+            const lines = yamlContent.split('\n');
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith('#')) continue;
+                
+                const colonIndex = trimmed.indexOf(':');
+                if (colonIndex === -1) continue;
+                
+                const key = trimmed.substring(0, colonIndex).trim();
+                let value: any = trimmed.substring(colonIndex + 1).trim();
+                
+                // Handle arrays [item1, item2] or - item format
+                if (value.startsWith('[') && value.endsWith(']')) {
+                    value = value.slice(1, -1).split(',').map((v: string) => v.trim().replace(/['"]/g, ''));
+                } else if (value.startsWith('-')) {
+                    // Multi-line array format - collect following lines
+                    const arrayItems = [value.substring(1).trim()];
+                    let j = lines.indexOf(line) + 1;
+                    while (j < lines.length && lines[j].trim().startsWith('-')) {
+                        arrayItems.push(lines[j].trim().substring(1).trim());
+                        j++;
+                    }
+                    value = arrayItems;
+                } else {
+                    // Remove quotes
+                    value = value.replace(/^['"]|['"]$/g, '');
+                }
+                
+                frontmatter[key] = value;
+            }
+            
+            const contentWithoutFrontmatter = content.replace(frontmatterRegex, '');
+            return { content: contentWithoutFrontmatter, frontmatter };
+        } catch (error) {
+            console.warn('Failed to parse frontmatter:', error);
+            return { content };
+        }
+    }
+
+    private convertObsidianTags(content: string): string {
+        // Convert #tag to AsciiDoc inline formatting with tag role
+        return content.replace(/#([a-zA-Z0-9\-_\/]+)/g, (match, tag) => {
+            return `[.tag]#${tag}#`;
+        });
+    }
+
+    private convertObsidianCallouts(content: string): string {
+        // Convert Obsidian callouts to AsciiDoc admonitions
+        const lines = content.split('\n');
+        const result: string[] = [];
+        let i = 0;
+        
+        while (i < lines.length) {
+            const line = lines[i];
+            const calloutMatch = line.match(/^>\s*\[!(note|tip|important|warning|caution|example|quote)([+-])?\]\s*(.*?)$/);
+            
+            if (calloutMatch) {
+                const [, type, collapsible, title] = calloutMatch;
+                const admonitionType = type.toUpperCase();
+                const isCollapsible = collapsible === '-';
+                
+                // Start building the admonition
+                let admonition = `[${admonitionType}]`;
+                if (title) {
+                    admonition += `\n.${title}`;
+                }
+                if (isCollapsible) {
+                    admonition += `\n[%collapsible]`;
+                }
+                admonition += '\n====';
+                
+                result.push(admonition);
+                i++;
+                
+                // Collect all following lines that start with >
+                while (i < lines.length && lines[i].startsWith('>')) {
+                    const contentLine = lines[i].replace(/^>\s?/, '');
+                    result.push(contentLine);
+                    i++;
+                }
+                
+                // Close the admonition
+                result.push('====');
+            } else {
+                result.push(line);
+                i++;
+            }
+        }
+        
+        return result.join('\n');
+    }
+
+    private convertObsidianEmbeds(content: string): string {
+        // Convert ![[filename]] to AsciiDoc include
+        content = content.replace(/!\[\[([^\]|]+)(\|([^\]]+))?\]\]/g, (match, filename, pipe, alt) => {
+            // Check if it's an image file
+            const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp'];
+            const isImage = imageExtensions.some(ext => filename.toLowerCase().endsWith(ext));
+            
+            if (isImage) {
+                const altText = alt || filename.replace(/\.[^.]+$/, '');
+                return `image::${filename}[${altText}]`;
+            } else {
+                // For markdown files, convert to include
+                const includeFile = filename.endsWith('.md') ? filename.replace('.md', '.adoc') : filename;
+                return `include::${includeFile}[]`;
+            }
+        });
+        
+        return content;
+    }
+
+    private convertObsidianWikilinks(content: string): string {
+        // Convert [[Note Name]] to AsciiDoc cross-references
+        return content.replace(/\[\[([^\]|]+)(\|([^\]]+))?\]\]/g, (match, target, pipe, text) => {
+            const linkText = text || target;
+            
+            // Handle section links [[Note#Section]]
+            if (target.includes('#')) {
+                const [noteName, section] = target.split('#');
+                const fileName = this.sanitizeFileName(noteName) + '.adoc';
+                const sectionId = this.sanitizeSectionId(section);
+                return `xref:${fileName}#${sectionId}[${linkText}]`;
+            } else {
+                const fileName = this.sanitizeFileName(target) + '.adoc';
+                return `xref:${fileName}[${linkText}]`;
+            }
+        });
+    }
+
+    private convertObsidianBlockReferences(content: string): string {
+        // Convert block references ^block-id to AsciiDoc anchors
+        content = content.replace(/\s+\^([a-zA-Z0-9\-_]+)$/gm, ' [[block-$1]]');
+        
+        // Convert block reference links [[note#^block-id]] to xref
+        content = content.replace(/\[\[([^\]|]+)#\^([a-zA-Z0-9\-_]+)(\|([^\]]+))?\]\]/g, (match, noteName, blockId, pipe, text) => {
+            const linkText = text || `${noteName} (Block)`;
+            const fileName = this.sanitizeFileName(noteName) + '.adoc';
+            return `xref:${fileName}#block-${blockId}[${linkText}]`;
+        });
+        
+        return content;
+    }
+
+    private convertObsidianMath(content: string): string {
+        // Convert block math $$formula$$ to AsciiDoc stem block first (to avoid conflicts)
+        content = content.replace(/\$\$([\s\S]*?)\$\$/g, (match, formula) => {
+            return `[stem]\n++++\n${formula.trim()}\n++++`;
+        });
+        
+        // Convert inline math $formula$ to AsciiDoc stem
+        content = content.replace(/\$([^$]+)\$/g, 'latexmath:[$1]');
+        
+        return content;
+    }
+
+    private sanitizeFileName(name: string): string {
+        // Convert to lowercase and replace special characters with hyphens
+        return name.toLowerCase()
+            .replace(/[^a-z0-9\-_]/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
+    }
+
+    private sanitizeSectionId(section: string): string {
+        // Convert section names to valid AsciiDoc IDs
+        return section.toLowerCase()
+            .replace(/[^a-z0-9\-_]/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
     }
 
     private convertHeaders(content: string): string {
@@ -274,13 +530,9 @@ export class VaultExporter {
     }
 
     private convertLinks(content: string): string {
-        // Convert Obsidian internal links [[Note Name]] to AsciiDoc cross-references
-        content = content.replace(/\[\[([^\]|]+)(\|([^\]]+))?\]\]/g, (match, target, pipe, text) => {
-            const linkText = text || target;
-            const fileName = target.replace(/[^a-zA-Z0-9\-_]/g, '-').toLowerCase() + '.adoc';
-            return `link:${fileName}[${linkText}]`;
-        });
-
+        // Note: Obsidian wikilinks are now handled by convertObsidianWikilinks()
+        // This method now only handles standard markdown links
+        
         // Convert markdown links [text](url) to AsciiDoc links
         content = content.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
             if (url.startsWith('http://') || url.startsWith('https://')) {
@@ -468,25 +720,44 @@ _This export was generated by the Obsidian Vault Exporter plugin._
             .map(file => {
                 const asciidocFileName = file.path.replace(/\.md$/, '.adoc');
                 const title = file.name.replace('.md', '');
-                return `* link:${asciidocFileName}[${title}]`;
+                return `* xref:${asciidocFileName}[${title}]`;
             })
             .join('\n');
     }
 
     private async ensureDirectory(dirPath: string): Promise<void> {
         try {
-            await this.app.vault.adapter.mkdir(dirPath);
+            // Für absolute Pfade verwende Node.js fs, für relative Pfade den Vault Adapter
+            if (this.isAbsolutePath(dirPath)) {
+                const fs = require('fs').promises;
+                await fs.mkdir(dirPath, { recursive: true });
+            } else {
+                await this.app.vault.adapter.mkdir(dirPath);
+            }
         } catch (error) {
             // Directory might already exist, ignore error
+            console.log(`Directory creation info: ${error.message}`);
         }
     }
 
     private async writeFile(filePath: string, content: string): Promise<void> {
-        await this.app.vault.adapter.write(filePath, content);
+        // Für absolute Pfade verwende Node.js fs, für relative Pfade den Vault Adapter
+        if (this.isAbsolutePath(filePath)) {
+            const fs = require('fs').promises;
+            await fs.writeFile(filePath, content, 'utf8');
+        } else {
+            await this.app.vault.adapter.write(filePath, content);
+        }
     }
 
     private async writeBinaryFile(filePath: string, content: ArrayBuffer): Promise<void> {
-        await this.app.vault.adapter.writeBinary(filePath, content);
+        // Für absolute Pfade verwende Node.js fs, für relative Pfade den Vault Adapter
+        if (this.isAbsolutePath(filePath)) {
+            const fs = require('fs').promises;
+            await fs.writeFile(filePath, Buffer.from(content));
+        } else {
+            await this.app.vault.adapter.writeBinary(filePath, content);
+        }
     }
 
     private dirname(filePath: string): string {
@@ -501,6 +772,102 @@ _This export was generated by the Obsidian Vault Exporter plugin._
     }
 
     private joinPath(...parts: string[]): string {
+        // Wenn der erste Teil ein absoluter Pfad ist, verwende ihn direkt
+        if (parts.length > 0 && this.isAbsolutePath(parts[0])) {
+            // Für Windows-Pfade: Verwende den korrekten Separator
+            if (parts[0].includes('\\')) {
+                return parts.join('\\').replace(/\\+/g, '\\');
+            }
+        }
         return parts.join('/').replace(/\/+/g, '/');
+    }
+
+    // In-Memory Export Methods
+    private async exportMarkdownFilesAsAsciiDocToMemory(files: VaultFile[]): Promise<void> {
+        const markdownFiles = files.filter(f => f.isMarkdown);
+        
+        for (const file of markdownFiles) {
+            await this.exportMarkdownFileAsAsciiDocToMemory(file);
+        }
+    }
+
+    private async exportMarkdownFileAsAsciiDocToMemory(file: VaultFile): Promise<void> {
+        if (!file.content) return;
+
+        console.log(`Exporting to memory as AsciiDoc: ${file.path}`);
+
+        // Convert markdown content to AsciiDoc
+        const asciidocContent = await this.convertMarkdownToAsciiDoc(file.content, file);
+
+        // Change file extension from .md to .adoc
+        const asciidocPath = file.path.replace(/\.md$/, '.adoc');
+
+        this.exportedFiles.push({
+            path: asciidocPath,
+            content: asciidocContent,
+            type: 'asciidoc'
+        });
+    }
+
+    private async copyAllAttachmentsToMemory(files: VaultFile[]): Promise<void> {
+        console.log('Copying all attachments to memory for AsciiDoc export...');
+        
+        const allFiles = this.app.vault.getFiles();
+        let copiedCount = 0;
+        
+        for (const file of allFiles) {
+            if (file instanceof TFile && !file.path.endsWith('.md')) {
+                try {
+                    // Read file content
+                    let content: string;
+                    if (this.isBinaryFile(file.path)) {
+                        const binaryContent = await this.app.vault.readBinary(file);
+                        content = Buffer.from(binaryContent).toString('base64');
+                    } else {
+                        content = await this.app.vault.read(file);
+                    }
+                    
+                    this.exportedFiles.push({
+                        path: file.path,
+                        content: content,
+                        type: 'asset'
+                    });
+                    
+                    copiedCount++;
+                    console.log(`Copied to memory: ${file.path}`);
+                    
+                } catch (error) {
+                    console.error(`Error copying file ${file.path} to memory:`, error);
+                }
+            }
+        }
+        
+        console.log(`Copied ${copiedCount} files to memory`);
+    }
+
+    private async generateIndexAsciiDocToMemory(vaultStructure: VaultStructure): Promise<void> {
+        const indexContent = `= Vault Export
+:doctype: article
+:toc: left
+:toclevels: 3
+:sectlinks:
+:sectanchors:
+
+Exported on ${new Date().toLocaleDateString('de-DE')}
+
+== Files
+
+${this.generateAsciiDocFileList(vaultStructure.files)}
+
+---
+
+_This export was generated by the Obsidian Vault Exporter plugin._
+`;
+
+        this.exportedFiles.push({
+            path: 'index.adoc',
+            content: indexContent,
+            type: 'asciidoc'
+        });
     }
 }

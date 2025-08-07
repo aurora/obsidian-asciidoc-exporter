@@ -77,3 +77,19 @@ export interface AssetInfo {
     type: 'image' | 'video' | 'audio' | 'document' | 'other';
     size: number;
 }
+
+export interface ExportData {
+    files: ExportFileData[];
+    metadata: {
+        exportedAt: string;
+        totalFiles: number;
+        settings: ExportSettings;
+    };
+}
+
+export interface ExportFileData {
+    path: string;
+    content: string | Buffer;
+    type: 'asciidoc' | 'asset';
+    size: number;
+}
